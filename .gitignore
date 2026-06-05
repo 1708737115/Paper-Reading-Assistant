@@ -1,0 +1,13 @@
+data/
+node_modules/
+web/node_modules/
+.npm-cache/
+web/.next/
+web/out/
+*.pyc
+__pycache__/
+.pytest_cache/
+.venv/
+.env
+.env.local
+playwright-report/

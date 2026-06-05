@@ -1,0 +1,15 @@
+{
+  "name": "bilingual-paper-reader",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev:api": "python -m uvicorn api.app.main:app --host 127.0.0.1 --port 8000 --reload",
+    "dev:web": "npm --prefix web run dev",
+    "dev": "concurrently \"npm run dev:api\" \"npm run dev:web\"",
+    "build:web": "npm --prefix web run build",
+    "check:api": "python -m compileall api/app"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2"
+  }
+}
