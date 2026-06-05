@@ -210,7 +210,7 @@ def batch_blocks(blocks: list[SourceBlock], max_chars: int = 8500, max_blocks: i
 
 def normalize_translation_response(raw: str, blocks: list[SourceBlock]) -> list[TranslatedBlock]:
     data = parse_json_value(raw)
-    items = extract_translation_items(data)
+    items = extract_translation_items(data, [block.block_id for block in blocks])
     if not items:
         raise TranslationFormatError("no translation items found")
 
@@ -236,7 +236,7 @@ def normalize_translation_response(raw: str, blocks: list[SourceBlock]) -> list[
         if block_id in translated_by_id:
             continue
 
-        translation = first_text(item, ("translation", "translated_text", "target_text", "chinese", "zh", "zh_text", "text"))
+        translation = first_text(item, TRANSLATION_TEXT_KEYS)
         if not translation:
             missing_translation_ids.append(block_id)
             continue
@@ -273,15 +273,119 @@ def normalize_translation_response(raw: str, blocks: list[SourceBlock]) -> list[
     return translated
 
 
-def extract_translation_items(data: Any) -> list[Any]:
+TRANSLATION_CONTAINER_KEYS = (
+    "translations",
+    "translated_blocks",
+    "translatedBlocks",
+    "results",
+    "items",
+    "blocks",
+    "paragraphs",
+    "segments",
+    "outputs",
+)
+
+TRANSLATION_TEXT_KEYS = (
+    "translation",
+    "translated",
+    "translated_text",
+    "translatedText",
+    "translation_text",
+    "target_text",
+    "targetText",
+    "chinese",
+    "zh",
+    "zh_text",
+    "zhText",
+    "zh_cn",
+    "text",
+    "content",
+)
+
+
+def extract_translation_items(data: Any, known_block_ids: list[str] | None = None) -> list[Any]:
+    known_block_ids = known_block_ids or []
     if isinstance(data, list):
-        return data
+        return normalize_list_items(data)
     if isinstance(data, dict):
-        for key in ("translations", "translated_blocks", "results", "items"):
+        mapped = block_mapping_items(data, known_block_ids)
+        if mapped:
+            return mapped
+        for key in TRANSLATION_CONTAINER_KEYS:
             value = data.get(key)
             if isinstance(value, list):
-                return value
-    raise TranslationFormatError("expected a translations array")
+                return normalize_list_items(value)
+            if isinstance(value, dict):
+                mapped = block_mapping_items(value, known_block_ids)
+                if mapped:
+                    return mapped
+        nested = find_best_translation_list(data, known_block_ids)
+        if nested:
+            return nested
+    raise TranslationFormatError("expected a translations array or block-id keyed translation object")
+
+
+def normalize_list_items(items: list[Any]) -> list[Any]:
+    if all(isinstance(item, str) for item in items):
+        return [{"translation": item} for item in items]
+    return items
+
+
+def block_mapping_items(data: dict[str, Any], known_block_ids: list[str]) -> list[dict[str, Any]]:
+    if not known_block_ids:
+        return []
+    items_by_id: dict[str, dict[str, Any]] = {}
+    for block_id in known_block_ids:
+        value = data.get(block_id)
+        if isinstance(value, str):
+            items_by_id[block_id] = {"block_id": block_id, "translation": value}
+        elif isinstance(value, dict):
+            item = dict(value)
+            item.setdefault("block_id", block_id)
+            items_by_id[block_id] = item
+    return [items_by_id[block_id] for block_id in known_block_ids if block_id in items_by_id]
+
+
+def find_best_translation_list(data: Any, known_block_ids: list[str]) -> list[Any]:
+    candidates: list[tuple[int, list[Any]]] = []
+
+    def visit(value: Any) -> None:
+        if isinstance(value, list):
+            normalized = normalize_list_items(value)
+            score = translation_list_score(normalized, known_block_ids)
+            if score > 0:
+                candidates.append((score, normalized))
+            for item in value:
+                visit(item)
+        elif isinstance(value, dict):
+            mapped = block_mapping_items(value, known_block_ids)
+            if mapped:
+                candidates.append((translation_list_score(mapped, known_block_ids) + 5, mapped))
+            for nested in value.values():
+                visit(nested)
+
+    visit(data)
+    if not candidates:
+        return []
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    return candidates[0][1]
+
+
+def translation_list_score(items: list[Any], known_block_ids: list[str]) -> int:
+    score = 0
+    known = set(known_block_ids)
+    for item in items:
+        if isinstance(item, dict):
+            block_id = coerce_text(item.get("block_id") or item.get("id"))
+            if block_id in known:
+                score += 5
+            if any(coerce_text(item.get(key)) for key in TRANSLATION_TEXT_KEYS):
+                score += 3
+            if "page_number" in item or "page" in item:
+                score += 1
+            if "source_text" in item or "source" in item:
+                score += 1
+    return score
 
 
 def first_text(item: dict[str, Any], keys: tuple[str, ...]) -> str:
