@@ -16,11 +16,16 @@ import { API_BASE, createJob, getJob, JobPublic, Provider, PROVIDERS } from "@/l
 
 const completedStates = new Set(["completed", "failed"]);
 
+function apiKeyStorageKey(provider: Provider) {
+  return `paper-reader:${provider}:api-key`;
+}
+
 export default function Home() {
   const [provider, setProvider] = useState<Provider>("openai");
   const activeProvider = useMemo(() => PROVIDERS.find((item) => item.id === provider) ?? PROVIDERS[0], [provider]);
   const [model, setModel] = useState(activeProvider.defaultModel);
   const [apiKey, setApiKey] = useState("");
+  const [rememberKey, setRememberKey] = useState(false);
   const [file, setFile] = useState<File | null>(null);
   const [job, setJob] = useState<JobPublic | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -29,7 +34,16 @@ export default function Home() {
 
   useEffect(() => {
     setModel(activeProvider.defaultModel);
-  }, [activeProvider.defaultModel]);
+    const savedKey = window.localStorage.getItem(apiKeyStorageKey(activeProvider.id)) ?? "";
+    setApiKey(savedKey);
+    setRememberKey(Boolean(savedKey));
+  }, [activeProvider.defaultModel, activeProvider.id]);
+
+  useEffect(() => {
+    if (rememberKey && apiKey.trim()) {
+      window.localStorage.setItem(apiKeyStorageKey(provider), apiKey.trim());
+    }
+  }, [apiKey, provider, rememberKey]);
 
   useEffect(() => {
     if (!job || completedStates.has(job.status)) {
@@ -59,15 +73,21 @@ export default function Home() {
     setSubmitting(true);
     setError(null);
     setJob(null);
+    const trimmedApiKey = apiKey.trim();
     try {
       const created = await createJob({
         file,
         provider,
         model: model.trim(),
-        apiKey: apiKey.trim()
+        apiKey: trimmedApiKey
       });
+      if (rememberKey) {
+        window.localStorage.setItem(apiKeyStorageKey(provider), trimmedApiKey);
+      } else {
+        window.localStorage.removeItem(apiKeyStorageKey(provider));
+      }
       setJob(created);
-      setApiKey("");
+      setApiKey(rememberKey ? trimmedApiKey : "");
     } catch (err) {
       setError(err instanceof Error ? err.message : "任务创建失败");
     } finally {
@@ -167,7 +187,21 @@ export default function Home() {
               autoComplete="off"
               onChange={(event) => setApiKey(event.target.value)}
             />
-            <div className="field-note">仅本次任务使用</div>
+            <label className="checkbox-line">
+              <input
+                type="checkbox"
+                checked={rememberKey}
+                onChange={(event) => {
+                  const checked = event.target.checked;
+                  setRememberKey(checked);
+                  if (!checked) {
+                    window.localStorage.removeItem(apiKeyStorageKey(provider));
+                  }
+                }}
+              />
+              <span>保存 API Key 到本机浏览器</span>
+            </label>
+            <div className="field-note">{rememberKey ? "下次自动填入" : "仅本次任务使用"}</div>
           </div>
 
           <button className="primary-action" type="submit" disabled={!canSubmit}>

@@ -179,6 +179,23 @@ a {
   font-size: 12px;
 }
 
+.checkbox-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.checkbox-line input {
+  width: 15px;
+  height: 15px;
+  padding: 0;
+  border-radius: 3px;
+  accent-color: var(--teal);
+}
+
 .segmented {
   display: grid;
   grid-template-columns: 1fr 1fr;
