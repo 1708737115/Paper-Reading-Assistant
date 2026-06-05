@@ -35,6 +35,22 @@ npm --prefix web install
 
 ## 运行
 
+最快方式是在 Windows 资源管理器里双击：
+
+```powershell
+start.bat
+```
+
+它会自动创建 `.venv`、安装缺失依赖、构建前端、启动本地 API 和网页，并打开 `http://127.0.0.1:3000`。如果 `3000` 或 `8000` 端口已经被占用，先关闭旧服务后再运行。
+
+也可以在 PowerShell 里运行：
+
+```powershell
+.\start.ps1
+```
+
+开发模式：
+
 ```powershell
 npm run dev
 ```

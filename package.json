@@ -3,9 +3,12 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
+    "build": "npm --prefix web run build",
     "dev:api": "python -m uvicorn api.app.main:app --host 127.0.0.1 --port 8000 --reload",
     "dev:web": "npm --prefix web run dev",
     "dev": "concurrently \"npm run dev:api\" \"npm run dev:web\"",
+    "start:api": ".\\.venv\\Scripts\\python -m uvicorn api.app.main:app --host 127.0.0.1 --port 8000",
+    "start:web": "npm --prefix web run start",
     "build:web": "npm --prefix web run build",
     "check:api": "python -m compileall api/app"
   },
