@@ -172,7 +172,7 @@ async def run_job(job_id: str, provider: ProviderName, model: str, api_key: str)
             warnings=collect_warnings(document),
         )
     except Exception as exc:
-        store.update(job_id, status=JobStatus.failed, progress=100, current_step="Failed", error=str(exc))
+        store.update(job_id, status=JobStatus.failed, progress=100, current_step="Failed", error=clean_error_message(exc))
 
 
 async def render_pdf_with_playwright(url: str, output_path: Path) -> None:
@@ -199,3 +199,11 @@ def collect_warnings(document: TranslationDocument) -> list[str]:
     for block in document.translations:
         warnings.extend(block.warnings)
     return sorted(set(warnings))[:20]
+
+
+def clean_error_message(exc: Exception) -> str:
+    message = str(exc).strip() or exc.__class__.__name__
+    first_line = message.splitlines()[0].strip()
+    if len(first_line) <= 600:
+        return first_line
+    return f"{first_line[:600]}..."

@@ -13,20 +13,12 @@ from .models import GlossaryTerm, ProviderName, SourceBlock, TranslatedBlock
 PayloadT = TypeVar("PayloadT", bound=BaseModel)
 
 
-class TranslationItem(BaseModel):
-    block_id: str
-    source_text: str
-    translation: str
-    terms: list[str] = Field(default_factory=list)
-    warnings: list[str] = Field(default_factory=list)
-
-
-class TranslationPayload(BaseModel):
-    translations: list[TranslationItem]
-
-
 class GlossaryPayload(BaseModel):
     terms: list[GlossaryTerm] = Field(default_factory=list)
+
+
+class TranslationFormatError(RuntimeError):
+    pass
 
 
 @dataclass
@@ -78,34 +70,14 @@ class BaseTranslator:
         )
         schema = translation_schema()
         raw = await self._json_request(SYSTEM_PROMPT, prompt, schema)
-        payload = await self._validate_or_repair(raw, TranslationPayload, schema)
-        by_id = {item.block_id: item for item in payload.translations}
-        translated: list[TranslatedBlock] = []
-        for block in blocks:
-            item = by_id.get(block.block_id)
-            if item is None:
-                translated.append(
-                    TranslatedBlock(
-                        page_number=block.page_number,
-                        block_id=block.block_id,
-                        source_text=block.source_text,
-                        translation="",
-                        terms=[],
-                        warnings=[*block.warnings, "Missing translation from model"],
-                    )
-                )
-                continue
-            translated.append(
-                TranslatedBlock(
-                    page_number=block.page_number,
-                    block_id=block.block_id,
-                    source_text=block.source_text,
-                    translation=item.translation.strip(),
-                    terms=item.terms,
-                    warnings=[*block.warnings, *item.warnings],
-                )
-            )
-        return translated
+        try:
+            return normalize_translation_response(raw, blocks)
+        except TranslationFormatError:
+            repaired = await self._repair_response(raw, schema)
+            try:
+                return normalize_translation_response(repaired, blocks)
+            except TranslationFormatError as exc:
+                raise RuntimeError(f"Model returned unsupported translation JSON: {exc}") from exc
 
     async def _json_request(self, system_prompt: str, user_prompt: str, schema: dict[str, Any]) -> str:
         raise NotImplementedError
@@ -119,13 +91,17 @@ class BaseTranslator:
         try:
             return model_type.model_validate(parse_json_object(raw))
         except (json.JSONDecodeError, ValidationError):
-            repair_prompt = (
-                "Repair the following model output into valid JSON that matches the requested schema. "
-                "Return JSON only and do not add commentary.\n\n"
-                f"Invalid output:\n{raw[:12000]}"
-            )
-            repaired = await self._json_request(SYSTEM_PROMPT, repair_prompt, schema)
+            repaired = await self._repair_response(raw, schema)
             return model_type.model_validate(parse_json_object(repaired))
+
+    async def _repair_response(self, raw: str, schema: dict[str, Any]) -> str:
+        repair_prompt = (
+            "Repair the following model output into valid JSON that matches the requested schema. "
+            "For translation payloads, each item only needs block_id, translation, terms, and warnings. "
+            "Return JSON only and do not add commentary.\n\n"
+            f"Invalid output:\n{raw[:12000]}"
+        )
+        return await self._json_request(SYSTEM_PROMPT, repair_prompt, schema)
 
 
 class OpenAIResponsesTranslator(BaseTranslator):
@@ -232,15 +208,131 @@ def batch_blocks(blocks: list[SourceBlock], max_chars: int = 8500, max_blocks: i
         yield batch
 
 
-def parse_json_object(raw: str) -> dict[str, Any]:
+def normalize_translation_response(raw: str, blocks: list[SourceBlock]) -> list[TranslatedBlock]:
+    data = parse_json_value(raw)
+    items = extract_translation_items(data)
+    if not items:
+        raise TranslationFormatError("no translation items found")
+
+    block_by_id = {block.block_id: block for block in blocks}
+    translated_by_id: dict[str, TranslatedBlock] = {}
+    missing_translation_ids: list[str] = []
+
+    for index, item in enumerate(items):
+        if not isinstance(item, dict):
+            continue
+        block_id = coerce_text(item.get("block_id") or item.get("id"))
+        block = block_by_id.get(block_id)
+        warnings = coerce_text_list(item.get("warnings"))
+
+        if block is None:
+            if index < len(blocks):
+                block = blocks[index]
+                block_id = block.block_id
+                warnings.append("Matched translation by batch order because block_id was missing or unknown")
+            else:
+                continue
+
+        if block_id in translated_by_id:
+            continue
+
+        translation = first_text(item, ("translation", "translated_text", "target_text", "chinese", "zh", "zh_text", "text"))
+        if not translation:
+            missing_translation_ids.append(block_id)
+            continue
+
+        translated_by_id[block_id] = TranslatedBlock(
+            page_number=block.page_number,
+            block_id=block.block_id,
+            source_text=block.source_text,
+            translation=translation,
+            terms=coerce_text_list(item.get("terms")),
+            warnings=[*block.warnings, *warnings],
+        )
+
+    if missing_translation_ids:
+        sample = ", ".join(missing_translation_ids[:5])
+        raise TranslationFormatError(f"missing translation text for {len(missing_translation_ids)} item(s): {sample}")
+
+    translated: list[TranslatedBlock] = []
+    for block in blocks:
+        item = translated_by_id.get(block.block_id)
+        if item is None:
+            translated.append(
+                TranslatedBlock(
+                    page_number=block.page_number,
+                    block_id=block.block_id,
+                    source_text=block.source_text,
+                    translation="",
+                    terms=[],
+                    warnings=[*block.warnings, "Missing translation from model"],
+                )
+            )
+        else:
+            translated.append(item)
+    return translated
+
+
+def extract_translation_items(data: Any) -> list[Any]:
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict):
+        for key in ("translations", "translated_blocks", "results", "items"):
+            value = data.get(key)
+            if isinstance(value, list):
+                return value
+    raise TranslationFormatError("expected a translations array")
+
+
+def first_text(item: dict[str, Any], keys: tuple[str, ...]) -> str:
+    for key in keys:
+        value = item.get(key)
+        text = coerce_text(value)
+        if text:
+            return text
+    return ""
+
+
+def coerce_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, (int, float)):
+        return str(value)
+    return ""
+
+
+def coerce_text_list(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value.strip()] if value.strip() else []
+    if isinstance(value, list):
+        return [text for text in (coerce_text(item) for item in value) if text]
+    return []
+
+
+def parse_json_value(raw: str) -> Any:
     try:
         return json.loads(raw)
     except json.JSONDecodeError:
-        start = raw.find("{")
-        end = raw.rfind("}")
-        if start >= 0 and end > start:
-            return json.loads(raw[start : end + 1])
+        object_start = raw.find("{")
+        object_end = raw.rfind("}")
+        array_start = raw.find("[")
+        array_end = raw.rfind("]")
+        if array_start >= 0 and array_end > array_start and (object_start < 0 or array_start < object_start):
+            return json.loads(raw[array_start : array_end + 1])
+        if object_start >= 0 and object_end > object_start:
+            return json.loads(raw[object_start : object_end + 1])
         raise
+
+
+def parse_json_object(raw: str) -> dict[str, Any]:
+    data = parse_json_value(raw)
+    if not isinstance(data, dict):
+        raise json.JSONDecodeError("Expected JSON object", raw, 0)
+    return data
 
 
 def extract_openai_response_text(data: dict[str, Any]) -> str:
@@ -310,12 +402,11 @@ def translation_schema() -> dict[str, Any]:
                         "additionalProperties": False,
                         "properties": {
                             "block_id": {"type": "string"},
-                            "source_text": {"type": "string"},
                             "translation": {"type": "string"},
                             "terms": {"type": "array", "items": {"type": "string"}},
                             "warnings": {"type": "array", "items": {"type": "string"}},
                         },
-                        "required": ["block_id", "source_text", "translation", "terms", "warnings"],
+                        "required": ["block_id", "translation", "terms", "warnings"],
                     },
                 }
             },
