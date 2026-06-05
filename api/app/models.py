@@ -39,6 +39,14 @@ class SourceBlock(BaseModel):
     warnings: list[str] = Field(default_factory=list)
 
 
+class SourceWord(BaseModel):
+    page_number: int
+    block_id: str
+    text: str
+    bbox: list[float] = Field(default_factory=list)
+    confidence: float | None = None
+
+
 class PageImage(BaseModel):
     page_number: int
     width: float
@@ -46,6 +54,7 @@ class PageImage(BaseModel):
     image_name: str
     extraction_method: Literal["text-layer", "ocr"]
     blocks: list[SourceBlock] = Field(default_factory=list)
+    words: list[SourceWord] = Field(default_factory=list)
 
 
 class GlossaryTerm(BaseModel):
@@ -62,6 +71,14 @@ class TranslatedBlock(BaseModel):
     warnings: list[str] = Field(default_factory=list)
 
 
+class LookupEntry(BaseModel):
+    source: str
+    meaning: str
+    explanation: str = ""
+    block_ids: list[str] = Field(default_factory=list)
+    page_numbers: list[int] = Field(default_factory=list)
+
+
 class TranslationDocument(BaseModel):
     job_id: str
     filename: str
@@ -71,6 +88,7 @@ class TranslationDocument(BaseModel):
     pages: list[PageImage]
     translations: list[TranslatedBlock]
     glossary: list[GlossaryTerm] = Field(default_factory=list)
+    lookup_entries: list[LookupEntry] = Field(default_factory=list)
 
 
 class JobPublic(BaseModel):

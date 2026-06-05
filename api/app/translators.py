@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from typing import Any, Callable, Iterable, TypeVar
 
 import httpx
 from pydantic import BaseModel, Field, ValidationError
 
-from .models import GlossaryTerm, ProviderName, SourceBlock, TranslatedBlock
+from .models import GlossaryTerm, LookupEntry, ProviderName, SourceBlock, TranslatedBlock
 
 
 PayloadT = TypeVar("PayloadT", bound=BaseModel)
@@ -15,6 +16,10 @@ PayloadT = TypeVar("PayloadT", bound=BaseModel)
 
 class GlossaryPayload(BaseModel):
     terms: list[GlossaryTerm] = Field(default_factory=list)
+
+
+class LookupPayload(BaseModel):
+    entries: list[LookupEntry] = Field(default_factory=list)
 
 
 class TranslationFormatError(RuntimeError):
@@ -78,6 +83,33 @@ class BaseTranslator:
                 return normalize_translation_response(repaired, blocks)
             except TranslationFormatError as exc:
                 raise RuntimeError(f"Model returned unsupported translation JSON: {exc}") from exc
+
+    async def build_lookup_entries(self, blocks: list[SourceBlock], glossary: list[GlossaryTerm]) -> list[LookupEntry]:
+        entries: list[LookupEntry] = []
+        glossary_text = json.dumps([term.model_dump() for term in glossary], ensure_ascii=False)
+        batches = list(batch_blocks(blocks, max_chars=10000, max_blocks=18))
+        for batch in batches:
+            block_payload = [
+                {
+                    "page_number": block.page_number,
+                    "block_id": block.block_id,
+                    "source_text": block.source_text,
+                }
+                for block in batch
+            ]
+            prompt = (
+                "Create clickable reading lookup entries for an English academic paper. "
+                "Return JSON only with an entries array. Pick important terms, useful phrases, "
+                "and uncommon academic words from the exact source text. Use Simplified Chinese. "
+                "Each entry must include source, meaning, explanation, block_ids, and page_numbers. "
+                "Keep source as the exact English word or phrase users may click. Limit this batch to 30 entries.\n\n"
+                f"Existing glossary:\n{glossary_text}\n\n"
+                f"Blocks:\n{json.dumps(block_payload, ensure_ascii=False)}"
+            )
+            raw = await self._json_request(SYSTEM_PROMPT, prompt, lookup_schema())
+            payload = await self._validate_or_repair(raw, LookupPayload, lookup_schema())
+            entries.extend(payload.entries)
+        return dedupe_lookup_entries(entries)
 
     async def _json_request(self, system_prompt: str, user_prompt: str, schema: dict[str, Any]) -> str:
         raise NotImplementedError
@@ -179,10 +211,15 @@ async def translate_blocks(
     progress: Callable[[int, str], None],
     start_progress: int = 45,
     end_progress: int = 88,
-) -> tuple[list[GlossaryTerm], list[TranslatedBlock]]:
+) -> tuple[list[GlossaryTerm], list[TranslatedBlock], list[LookupEntry]]:
     translator = create_translator(config)
     progress(start_progress, "Building glossary")
     glossary = await translator.build_glossary(blocks)
+    progress(start_progress + 5, "Building lookup entries")
+    try:
+        lookup_entries = await translator.build_lookup_entries(blocks, glossary)
+    except Exception:
+        lookup_entries = lookup_entries_from_glossary(glossary)
     batches = list(batch_blocks(blocks))
     translated: list[TranslatedBlock] = []
     total = max(1, len(batches))
@@ -190,7 +227,34 @@ async def translate_blocks(
         current = start_progress + int(index / total * (end_progress - start_progress))
         progress(current, f"Translating batch {index}/{total}")
         translated.extend(await translator.translate_batch(batch, glossary))
-    return glossary, translated
+    return glossary, translated, lookup_entries
+
+
+def dedupe_lookup_entries(entries: list[LookupEntry]) -> list[LookupEntry]:
+    deduped: dict[str, LookupEntry] = {}
+    for entry in entries:
+        key = normalize_lookup_key(entry.source)
+        if not key or key in deduped:
+            continue
+        deduped[key] = entry
+    return list(deduped.values())[:250]
+
+
+def lookup_entries_from_glossary(glossary: list[GlossaryTerm]) -> list[LookupEntry]:
+    return [
+        LookupEntry(
+            source=term.source,
+            meaning=term.target,
+            explanation="From the generated paper glossary.",
+            block_ids=[],
+            page_numbers=[],
+        )
+        for term in glossary
+    ]
+
+
+def normalize_lookup_key(value: str) -> str:
+    return re.sub(r"\s+", " ", value.strip().lower())
 
 
 def batch_blocks(blocks: list[SourceBlock], max_chars: int = 8500, max_blocks: int = 14) -> Iterable[list[SourceBlock]]:
@@ -488,6 +552,34 @@ def glossary_schema() -> dict[str, Any]:
                 }
             },
             "required": ["terms"],
+        },
+    }
+
+
+def lookup_schema() -> dict[str, Any]:
+    return {
+        "name": "lookup_payload",
+        "schema": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "entries": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "properties": {
+                            "source": {"type": "string"},
+                            "meaning": {"type": "string"},
+                            "explanation": {"type": "string"},
+                            "block_ids": {"type": "array", "items": {"type": "string"}},
+                            "page_numbers": {"type": "array", "items": {"type": "integer"}},
+                        },
+                        "required": ["source", "meaning", "explanation", "block_ids", "page_numbers"],
+                    },
+                }
+            },
+            "required": ["entries"],
         },
     }
 

@@ -143,7 +143,7 @@ async def run_job(job_id: str, provider: ProviderName, model: str, api_key: str)
             raise RuntimeError("No readable text blocks were found in this PDF.")
 
         store.update(job_id, pages=len(pages), progress=42, current_step="Preparing translation")
-        glossary, translations = await translate_blocks(
+        glossary, translations, lookup_entries = await translate_blocks(
             ProviderConfig(provider=provider, model=model, api_key=api_key),
             blocks,
             progress,
@@ -158,6 +158,7 @@ async def run_job(job_id: str, provider: ProviderName, model: str, api_key: str)
             pages=pages,
             translations=translations,
             glossary=glossary,
+            lookup_entries=lookup_entries,
         )
         manifest_path = job.job_dir / "document.json"
         manifest_path.write_text(document.model_dump_json(indent=2), encoding="utf-8")
